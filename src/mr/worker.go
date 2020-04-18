@@ -1,10 +1,21 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"encoding/gob"
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+	"sort"
+	"strconv"
+	"time"
+)
 
+// for sorting by key.
+type ByKey []KeyValue
 
 //
 // Map functions return a slice of KeyValue.
@@ -12,6 +23,12 @@ import "hash/fnv"
 type KeyValue struct {
 	Key   string
 	Value string
+}
+
+type Work struct {
+	Id      int64
+	Mapf    func(string, string) []KeyValue
+	Reducef func(string, []string) string
 }
 
 //
@@ -24,41 +41,139 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
-
-	// Your worker implementation here.
-
-	// uncomment to send the Example RPC to the master.
-	// CallExample()
-
+	gob.Register(&MapTask{})
+	gob.Register(&ReduceTask{})
+	worker := &Work{
+		Mapf:    mapf,
+		Reducef: reducef,
+	}
+	worker.Run()
 }
 
-//
-// example function to show how to make an RPC call to the master.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func CallExample() {
+func (w *Work) Run() {
+	for {
+		reply := w.PullTask()
+		if reply == nil {
+			return
+		}
+		switch reply.Master_Phase {
+		case Phase_Complete:
+			return
+		case Phase_Map:
+			if reply.Task == nil {
+				if debug {
+					log.Printf("Cannot apply a map Task")
+				}
+				time.Sleep(time.Second)
+			} else {
+				w.RunMapTask(reply.Task.(*MapTask))
+			}
+		case Phase_Reduce:
+			if reply.Task == nil {
+				if debug {
+					log.Printf("Cannot apply a reduce Task")
+				}
+				time.Sleep(time.Second)
+			} else {
+				w.RunReduceTask(reply.Task.(*ReduceTask))
+			}
+		}
+	}
+}
 
-	// declare an argument structure.
-	args := ExampleArgs{}
+func (w *Work) RunMapTask(task *MapTask) {
+	if debug {
+		log.Printf("Receive a map task: %v\n", *task)
+	}
+	file, err := os.Open(task.FileName)
+	if err != nil {
+		log.Fatalf("cannot open %v", task.FileName)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", task.FileName)
+	}
+	file.Close()
+	kva := w.Mapf(task.FileName, string(content))
+	sort.Sort(ByKey(kva))
 
-	// fill in the argument(s).
-	args.X = 99
+	kvas := make([][]KeyValue, task.NReduce)
 
-	// declare a reply structure.
-	reply := ExampleReply{}
+	for _, kv := range kva {
+		outk := ihash(kv.Key) % task.NReduce
+		kvas[outk] = append(kvas[outk], kv)
+	}
+	intermediatefiles := make([]string, 0)
+	for i := 0; i < task.NReduce; i++ {
+		os.Mkdir("maptmp", os.ModePerm)
+		filename := "maptmp/mr-" + strconv.Itoa(task.Id) + "-" + strconv.Itoa(i)
+		file, _ := os.Create(filename)
+		enc := json.NewEncoder(file)
+		for _, kv := range kvas[i] {
+			err := enc.Encode(&kv)
+			if err != nil {
+				log.Printf("write intermediate file name")
+			}
+		}
+		intermediatefiles = append(intermediatefiles, filename)
+	}
+	w.ReportTaskFinish(task.Id, Phase_Map, intermediatefiles)
+}
+func (w *Work) RunReduceTask(task *ReduceTask) {
+	if debug {
+		log.Printf("Receive a reduce task: %v\n", *task)
+	}
+	files := task.FileNames
+	kva := make(map[string][]string)
+	for _, filename := range files {
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open %v", filename)
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kva[kv.Key] = append(kva[kv.Key], kv.Value)
+		}
+	}
+	ofile, _ := os.Create("mr-out-" + strconv.Itoa(task.Id))
 
-	// send the RPC request, wait for the reply.
-	call("Master.Example", &args, &reply)
-
-	// reply.Y should be 100.
-	fmt.Printf("reply.Y %v\n", reply.Y)
+	for k := range kva {
+		output := w.Reducef(k, kva[k])
+		fmt.Fprintf(ofile, "%v %v\n", k, output)
+	}
+	w.ReportTaskFinish(task.Id, Phase_Reduce, nil)
+}
+func (w *Work) ReportTaskFinish(taskId int, taskPhase int, intermediates []string) {
+	args := ReportTaskFinishArgs{
+		TaskId:            taskId,
+		TaskPhase:         taskPhase,
+		IntermediateFiles: intermediates,
+	}
+	reply := ReportTaskFinishReply{}
+	call("Master.ReportTaskFinish", &args, &reply)
+}
+func (w *Work) PullTask() *PullTaskReply {
+	args := PullTaskArgs{}
+	reply := PullTaskReply{}
+	if call("Master.AssignTask", &args, &reply) {
+		return &reply
+	} else {
+		return nil
+	}
 }
 
 //
