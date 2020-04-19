@@ -160,7 +160,7 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 	Term        int
 	VoteGranted bool
-	MyId int
+	VoterId int
 }
 type AppendEntriesReply struct {
 	LisentHeartBeat bool
@@ -179,10 +179,10 @@ func (rf *Raft) becomeLeader() {
 func (rf *Raft) turnFollower(Term, LeaderId int) {
 	rf.CurrentTerm = Term
 	rf.State = Follower
-	rf.VotedForId = LeaderId
+	rf.VotedForId = -1
 	rf.VotedCount = 0
 	rf.LeaderId = LeaderId
-	debug("===> [%d] -%d- follower [ %d ]", rf.ElectionTimeout, rf.me, rf.CurrentTerm)
+	debug("===> [%d] (%d) follower =%d=", rf.me, rf.ElectionTimeout, rf.CurrentTerm)
 }
 
 func (rf *Raft) turnCandidate() {
@@ -191,11 +191,11 @@ func (rf *Raft) turnCandidate() {
 	rf.CurrentTerm++
 	rf.VotedForId = rf.me
 	rf.ResetTimeOut()
-	debug("===> [%d] -%d- candidate [ %d ]", rf.ElectionTimeout, rf.me, rf.CurrentTerm)
+	debug("===> [%d] (%d) candidate =%d=", rf.me, rf.ElectionTimeout, rf.CurrentTerm)
 }
 func (rf *Raft) turnLeader() {
 	rf.State = Leader
-	debug("===> [%d] -%d- leader [ %d ]", rf.ElectionTimeout, rf.me, rf.CurrentTerm)
+	debug("===> [%d] (%d) leader =%d=", rf.me, rf.ElectionTimeout, rf.CurrentTerm)
 }
 
 func (rf *Raft) isDone() bool {
@@ -242,11 +242,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	debug("===> -%d-  receive form -%d-", rf.me, args.CandidateId)
-	reply.MyId = rf.me
+	//debug("===> [%d] ---receive vote resq---> [%d]", rf.me, args.CandidateId)
+	reply.VoterId = rf.me
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
+		return
 	}
 	if args.Term > rf.CurrentTerm && rf.State != Follower {
 		rf.turnFollower(args.Term, NoLeader)
@@ -264,15 +265,15 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
 	}
-	debug("===> -%d-  vote for -%d- %s", rf.me, args.CandidateId, strconv.FormatBool(reply.VoteGranted))
 }
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	debug("===> -%d- listen from -%d-", rf.me, args.LeaderId)
+	
 	if rf.CurrentTerm > args.Term {
 		reply.Term = rf.CurrentTerm
 		reply.LisentHeartBeat = false
+		return
 	}
 
 	rf.getHeartBeat()
@@ -306,10 +307,8 @@ func (rf *Raft) SendRequestVote() {
 			go func(args RequestVoteArgs, i int) {
 				var reply RequestVoteReply
 				ok := rf.sendRequestVote(i, &args, &reply)
-				if ok {
-					debug("===> -%d- send request vote to -%d-", rf.me, reply.MyId)
-				}
 				rf.mu.Lock()
+				debug("===> [%d] ---get resq--- [%d] %s", rf.me, reply.VoterId, strconv.FormatBool(reply.VoteGranted))
 				if rf.State == Candidate {
 					if ok && reply.VoteGranted {
 						rf.VotedCount++
@@ -349,9 +348,10 @@ func (rf *Raft) SendAppendEntries() {
 				var reply AppendEntriesReply
 				ok := rf.sendAppendEntries(i, &args ,&reply)
 				if !ok {
-					debug("===> %d not receive heart beat", i)
+					debug("===> [%d] ---/heart/---> %d", rf.me, i)
+					rf.Kill()
 				} else {
-					debug("===> -%d- send heart beat to -%d-", args.LeaderId, i)
+					debug("===> [%d] ---heart---> %d", rf.me, i)
 				}
 			}(args, i)
 		}
@@ -359,7 +359,6 @@ func (rf *Raft) SendAppendEntries() {
 	rf.mu.Unlock()
 }
 func (rf *Raft) serverAsleader() {
-	//debug("===> [%d] -%d- leader", rf.ElectionTimeout, rf.me)
 	rf.SendAppendEntries()
 	time.Sleep(50 * time.Millisecond)
 }
@@ -450,7 +449,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.mu.Lock()
 	rf.Done = true
-	debug("[ %d ] has been killed -------------", rf.me)
+	debug("[%d] has been killed -------------", rf.me)
 	rf.mu.Unlock()
 }
 
