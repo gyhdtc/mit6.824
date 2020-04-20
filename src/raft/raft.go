@@ -73,7 +73,7 @@ type Raft struct {
 	ElectionTimeout int
 
 	Done bool
-
+	
 	HeartBeatNotify   chan bool
 	VoteNotify        chan bool
 	ElectLeaderNotify chan bool
@@ -150,6 +150,7 @@ type RequestVoteArgs struct {
 type AppendEntriesArgs struct {
 	LeaderId  int
 	Term int
+	HeartNum int
 }
 
 //
@@ -163,8 +164,9 @@ type RequestVoteReply struct {
 	VoterId int
 }
 type AppendEntriesReply struct {
-	LisentHeartBeat bool
+	Success bool
 	Term int
+	LeaderId int
 }
 
 func (rf *Raft) getVoteRequest() {
@@ -242,51 +244,92 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//debug("===> [%d] ---receive vote resq---> [%d]", rf.me, args.CandidateId)
+
 	reply.VoterId = rf.me
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
 		return
 	}
-	if args.Term > rf.CurrentTerm && rf.State != Follower {
+	if args.Term > rf.CurrentTerm {
 		rf.turnFollower(args.Term, NoLeader)
+		if rf.VotedForId < 0 || rf.VotedForId == args.CandidateId {
+			reply.Term = rf.CurrentTerm
+			reply.VoteGranted = true
+			rf.VotedForId = args.CandidateId
+			rf.getVoteRequest()
+		}
+		return
 	}
-	// args.Term == rf.CurrentTerm
-	// can not trun follower, because they are same level
-	// If my VoteFor is not candidater, then i should not vote him
-	// Be sure my VoteFor is -1 noleader
-	if rf.CanVote(args.CandidateId) {
-		reply.Term = args.Term
-		reply.VoteGranted = true
-		rf.VotedForId = args.CandidateId
-		rf.getVoteRequest()
-	} else {
-		reply.Term = rf.CurrentTerm
-		reply.VoteGranted = false
+	/* args.Term == rf.CurrentTerm */
+	/* can not trun follower, because they are same level */
+	/* If my VoteFor is not candidater, then i should not vote him */
+	/* Be sure my VoteFor is -1 noleader */
+	if args.Term == rf.CurrentTerm {
+		// [C] vs F   voteforid: -1
+		// [C] vs C   voteforid: rf,me
+		// [C] vs L   voteforid: rf.me
+		if rf.VotedForId < 0 || rf.VotedForId == args.CandidateId {
+			reply.Term = rf.CurrentTerm
+			reply.VoteGranted = true
+			rf.VotedForId = args.CandidateId
+			rf.getVoteRequest()
+		} else {
+			reply.Term = rf.CurrentTerm
+			reply.VoteGranted = false
+		}
+		return
 	}
+
+	
+	// if rf.CanVote(args.CandidateId) {
+	// 	reply.Term = rf.CurrentTerm
+	// 	reply.VoteGranted = true
+	// 	rf.VotedForId = args.CandidateId
+	// 	rf.getVoteRequest()
+	// } else {
+	// 	reply.Term = rf.CurrentTerm
+	// 	reply.VoteGranted = false
+	// }
 }
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	
+	// there is a return before Unlock()
+	// so we should use 'defer'
 	if rf.CurrentTerm > args.Term {
 		reply.Term = rf.CurrentTerm
-		reply.LisentHeartBeat = false
+		reply.Success = false
+		reply.LeaderId = rf.me
 		return
 	}
 
 	rf.getHeartBeat()
-
-	if rf.CurrentTerm <= args.Term {
+	// if rf.CurrentTerm == args.Term
+	// only reset the timeout
+	// but not turn the node's status
+	if rf.CurrentTerm < args.Term {
 		rf.turnFollower(args.Term, args.LeaderId)
-		reply.Term = args.Term
-		reply.LisentHeartBeat = true
 	}
+	// if rf.State == Candidate {
+	// 	rf.turnFollower(rf.CurrentTerm, args.LeaderId)
+	// }		
+	if rf.CurrentTerm == args.Term {
+		if rf.State != Follower {
+			rf.turnFollower(args.Term, args.LeaderId)
+		}
+	}
+	reply.Term = rf.CurrentTerm
+	reply.Success = true
+	// if rf.State == Candidate {
+	// 	
+	// 	reply.Term = rf.CurrentTerm
+	// 	reply.Success = true
+	// 	reply.HeartNum = args.HeartNum
+	// }
 }
 
 func (rf *Raft) serverAsfollower() {
-	//debug("===> [%d] -%d- follower", rf.ElectionTimeout, rf.me)
 	select {
 	case <-time.Tick(time.Millisecond * time.Duration(rf.syncTimeOut())):
 		rf.mu.Lock()
@@ -306,12 +349,17 @@ func (rf *Raft) SendRequestVote() {
 			}
 			go func(args RequestVoteArgs, i int) {
 				var reply RequestVoteReply
+				debug("===> _%d_[%d] ---send vote req---> _%d_", rf.me, rf.CurrentTerm, i)
 				ok := rf.sendRequestVote(i, &args, &reply)
 				rf.mu.Lock()
-				debug("===> [%d] ---get resq--- [%d] %s", rf.me, reply.VoterId, strconv.FormatBool(reply.VoteGranted))
 				if rf.State == Candidate {
-					if ok && reply.VoteGranted {
-						rf.VotedCount++
+					if ok {
+						debug("===> _%d_[%d] <--get vote reply--- _%d_[%d] %s", rf.me, rf.CurrentTerm, reply.VoterId, reply.Term, strconv.FormatBool(reply.VoteGranted))
+						if reply.VoteGranted {
+							rf.VotedCount++
+						}
+					} else {
+						debug("===> _%d_[%d] ---not send vote req---> [%d]", rf.me, rf.CurrentTerm, i)
 					}
 					if rf.VotedCount > len(rf.peers)/2 {
 						rf.turnLeader()
@@ -325,7 +373,6 @@ func (rf *Raft) SendRequestVote() {
 	rf.mu.Unlock()
 }
 func (rf *Raft) serverAscandidate() {
-	//debug("===> [%d] -%d- candidate", rf.ElectionTimeout, rf.me)
 	rf.SendRequestVote()
 	select {
 	case <-time.Tick(time.Millisecond * time.Duration(rf.syncTimeOut())):
@@ -346,13 +393,20 @@ func (rf *Raft) SendAppendEntries() {
 			}
 			go func(args AppendEntriesArgs, i int) {
 				var reply AppendEntriesReply
+				debug("===> _%d_[%d] ---send heart---> _%d_", rf.me, rf.CurrentTerm, i)
 				ok := rf.sendAppendEntries(i, &args ,&reply)
-				if !ok {
-					debug("===> [%d] ---/heart/---> %d", rf.me, i)
-					rf.Kill()
+				rf.mu.Lock()
+				if ok {
+					if reply.Success {
+						debug("===> _%d_[%d] <---heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
+					} else {
+						debug("===> _%d_[%d] <---refuse heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
+						//rf.turnFollower(reply.Term, reply.LeaderId)
+					}
 				} else {
-					debug("===> [%d] ---heart---> %d", rf.me, i)
+					debug("===> _%d_[%d] ---not send heart---> _%d_", rf.me, rf.CurrentTerm, i)
 				}
+				rf.mu.Unlock()
 			}(args, i)
 		}
 	}
