@@ -62,21 +62,24 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	CurrentTerm int
-	VotedForId  int // raft.me means id
+	// 时变数据
+	State 				int			// 状态 F C L
+	ElectionTimeout 	int			// 超时选举
+	HeartBeatNotify		chan bool	// 心跳通知 （1）
+	VoteNotify        	chan bool	// 投票通知 （2）
+	ElectLeaderNotify 	chan bool	// 当选 Leader 通知 （3）
+		/* 上述 chan 将会在 select 中进行等待，发生一个，其他的都不会触发，还要在 server（）函数中进行重置 */
+		/* Follower ： 超时、心跳、投票 */
+		/* Candidate ： 超时、心跳、当选 */
+		/* Leader ： 发心跳、sleep（） */
+	VotedCount 			int			// 获得票数
+	LeaderId   			int
 
-	State int
-
-	VotedCount int
-	LeaderId   int
-
-	ElectionTimeout int
-
+	// 持久化数据
+	CurrentTerm int // 当前 Term
+	VotedForId  int // 候选人 ID
+	// 是否被 kill
 	Done bool
-	
-	HeartBeatNotify   chan bool
-	VoteNotify        chan bool
-	ElectLeaderNotify chan bool
 }
 
 const (
@@ -89,7 +92,6 @@ const (
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
 	// Your code here (2A).
@@ -144,31 +146,28 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term        int
-	CandidateId int
+	Term        	int
+	CandidateId 	int
+	LastLogIndex 	int
+	LastLogTerm 	int
 }
-type AppendEntriesArgs struct {
-	LeaderId  int
-	Term int
-	HeartNum int
-}
-
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term        int
-	VoteGranted bool
-	VoterId int
-}
-type AppendEntriesReply struct {
-	Success bool
-	Term int
-	LeaderId int
+	Term        	int
+	VoteGranted 	bool
 }
 
+type AppendEntriesArgs struct {
+	Term 		int
+	LeaderId  	int
+}
+type AppendEntriesReply struct {
+	Term 		int
+	Success 	bool
+	LeaderId 	int
+}
+
+// 得到一些列通知，触发 select
 func (rf *Raft) getVoteRequest() {
 	rf.VoteNotify <- true
 }
@@ -178,33 +177,36 @@ func (rf *Raft) getHeartBeat() {
 func (rf *Raft) becomeLeader() {
 	rf.ElectLeaderNotify <- true
 }
-func (rf *Raft) turnFollower(Term, LeaderId int) {
-	rf.CurrentTerm = Term
-	rf.State = Follower
-	rf.VotedForId = -1
-	rf.VotedCount = 0
-	rf.LeaderId = LeaderId
-	debug("===> [%d] (%d) follower =%d=", rf.me, rf.ElectionTimeout, rf.CurrentTerm)
-}
 
+// 状态转变
+/* 转为 Follower，更新 Term 和 State；选后人无，得票0；当前Term的Leader */
+func (rf *Raft) turnFollower(Term, LeaderId int) {
+	rf.State 		= Follower
+	rf.CurrentTerm 	= Term
+	rf.VotedForId 	= -1
+	rf.VotedCount 	= 0
+	rf.LeaderId 	= LeaderId
+	debug("===> _%d_ (%d) follower =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
+}
+/* 转为 Candidate，更新 State；选后人自己，得票 ++；当前Term ++；重置选举时间 */
 func (rf *Raft) turnCandidate() {
-	rf.State = Candidate
+	rf.State 		= Candidate
+	rf.VotedForId 	= rf.me
 	rf.VotedCount++
 	rf.CurrentTerm++
-	rf.VotedForId = rf.me
 	rf.ResetTimeOut()
-	debug("===> [%d] (%d) candidate =%d=", rf.me, rf.ElectionTimeout, rf.CurrentTerm)
+	debug("===> _%d_ (%d) candidate =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
 }
+/* 转为 Leader，更新 State */
 func (rf *Raft) turnLeader() {
 	rf.State = Leader
-	debug("===> [%d] (%d) leader =%d=", rf.me, rf.ElectionTimeout, rf.CurrentTerm)
+	debug("===> [%d] (%d) leader =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
 }
 
-func (rf *Raft) isDone() bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.Done
-}
+//
+// 【主循环】
+// 根据 raft 的状态来进行相应的 server_as...
+//
 func (rf *Raft) server() {
 	for !rf.isDone() {
 		switch rf.syncState() {
@@ -217,9 +219,37 @@ func (rf *Raft) server() {
 		}
 	}
 }
+func (rf *Raft) serverAsfollower() {
+	select {
+	case <-time.Tick(time.Millisecond * time.Duration(rf.syncTimeOut())):
+		rf.mu.Lock()
+		rf.turnCandidate()
+		rf.mu.Unlock()
+	case <-rf.HeartBeatNotify:
+	case <-rf.VoteNotify:
+	}
+}
+func (rf *Raft) serverAscandidate() {
+	rf.SendRequestVote()
+	select {
+	case <-time.Tick(time.Millisecond * time.Duration(rf.syncTimeOut())):
+		rf.mu.Lock()
+		rf.turnCandidate()
+		rf.mu.Unlock()
+	case <-rf.HeartBeatNotify:
+	case <-rf.ElectLeaderNotify:
+	}
+}
+func (rf *Raft) serverAsleader() {
+	rf.SendAppendEntries()
+	time.Sleep(50 * time.Millisecond)
+}
+
 //
 // example RequestVote RPC handler.
 //
+
+/* 一些辅助函数 */
 func (rf *Raft) syncState() int {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -239,13 +269,15 @@ func (rf *Raft) CanVote(candidateId int) bool {
 func (rf *Raft) agreeTerm(candidateId int) bool {
 	return rf.VotedForId < 0 || rf.VotedForId == candidateId
 }
+/* 一些辅助函数 */
 
+// 接收、处理 
+/* 接收投票 */
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	reply.VoterId = rf.me
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = false
@@ -280,65 +312,39 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 		return
 	}
-
-	
-	// if rf.CanVote(args.CandidateId) {
-	// 	reply.Term = rf.CurrentTerm
-	// 	reply.VoteGranted = true
-	// 	rf.VotedForId = args.CandidateId
-	// 	rf.getVoteRequest()
-	// } else {
-	// 	reply.Term = rf.CurrentTerm
-	// 	reply.VoteGranted = false
-	// }
 }
+/* 接收投票 */
+
+/* 接收心跳 */
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// there is a return before Unlock()
-	// so we should use 'defer'
+	
 	if rf.CurrentTerm > args.Term {
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
-		reply.LeaderId = rf.me
+		reply.LeaderId = rf.LeaderId
 		return
 	}
 
 	rf.getHeartBeat()
-	// if rf.CurrentTerm == args.Term
-	// only reset the timeout
-	// but not turn the node's status
-	if rf.CurrentTerm < args.Term {
+
+	/*  */
+
+	if !(rf.CurrentTerm == args.Term && rf.State == Follower) {
 		rf.turnFollower(args.Term, args.LeaderId)
 	}
-	// if rf.State == Candidate {
-	// 	rf.turnFollower(rf.CurrentTerm, args.LeaderId)
-	// }		
-	if rf.CurrentTerm == args.Term {
-		if rf.State != Follower {
-			rf.turnFollower(args.Term, args.LeaderId)
-		}
-	}
+
 	reply.Term = rf.CurrentTerm
 	reply.Success = true
-	// if rf.State == Candidate {
-	// 	
-	// 	reply.Term = rf.CurrentTerm
-	// 	reply.Success = true
-	// 	reply.HeartNum = args.HeartNum
-	// }
+	
+	return
 }
+/* 接收心跳 */
+// 接收、处理
 
-func (rf *Raft) serverAsfollower() {
-	select {
-	case <-time.Tick(time.Millisecond * time.Duration(rf.syncTimeOut())):
-		rf.mu.Lock()
-		rf.turnCandidate()
-		rf.mu.Unlock()
-	case <-rf.HeartBeatNotify:
-	case <-rf.VoteNotify:
-	}
-}
+// 发送
+/* 发送投票 */
 func (rf *Raft) SendRequestVote() {
 	rf.mu.Lock()
 	for i := range rf.peers {
@@ -354,7 +360,7 @@ func (rf *Raft) SendRequestVote() {
 				rf.mu.Lock()
 				if rf.State == Candidate {
 					if ok {
-						debug("===> _%d_[%d] <--get vote reply--- _%d_[%d] %s", rf.me, rf.CurrentTerm, reply.VoterId, reply.Term, strconv.FormatBool(reply.VoteGranted))
+						debug("===> _%d_[%d] <--get vote reply--- [%d] %s", rf.me, rf.CurrentTerm, reply.Term, strconv.FormatBool(reply.VoteGranted))
 						if reply.VoteGranted {
 							rf.VotedCount++
 						}
@@ -372,17 +378,9 @@ func (rf *Raft) SendRequestVote() {
 	}
 	rf.mu.Unlock()
 }
-func (rf *Raft) serverAscandidate() {
-	rf.SendRequestVote()
-	select {
-	case <-time.Tick(time.Millisecond * time.Duration(rf.syncTimeOut())):
-		rf.mu.Lock()
-		rf.turnCandidate()
-		rf.mu.Unlock()
-	case <-rf.HeartBeatNotify:
-	case <-rf.ElectLeaderNotify:
-	}
-}
+/* 发送投票 */
+
+/* 发送心跳 */
 func (rf *Raft) SendAppendEntries() {
 	rf.mu.Lock()
 	for i := range rf.peers {
@@ -401,7 +399,7 @@ func (rf *Raft) SendAppendEntries() {
 						debug("===> _%d_[%d] <---heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
 					} else {
 						debug("===> _%d_[%d] <---refuse heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
-						//rf.turnFollower(reply.Term, reply.LeaderId)
+						rf.turnFollower(reply.Term, reply.LeaderId)
 					}
 				} else {
 					debug("===> _%d_[%d] ---not send heart---> _%d_", rf.me, rf.CurrentTerm, i)
@@ -412,11 +410,10 @@ func (rf *Raft) SendAppendEntries() {
 	}
 	rf.mu.Unlock()
 }
-func (rf *Raft) serverAsleader() {
-	rf.SendAppendEntries()
-	time.Sleep(50 * time.Millisecond)
-}
+/* 发送心跳 */
+// 发送
 
+// Debug 函数
 const EnableDebug = true
 
 func debug(format string, a... interface{}) {
@@ -498,6 +495,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
 //
+
+func (rf *Raft) isDone() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.Done
+}
+
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
