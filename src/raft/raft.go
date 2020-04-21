@@ -186,21 +186,21 @@ func (rf *Raft) turnFollower(Term, LeaderId int) {
 	rf.VotedForId 	= -1
 	rf.VotedCount 	= 0
 	rf.LeaderId 	= LeaderId
-	debug("===> _%d_ (%d) follower =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
+	//debug("===> _%d_ (%d) follower =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
 }
 /* 转为 Candidate，更新 State；选后人自己，得票 ++；当前Term ++；重置选举时间 */
 func (rf *Raft) turnCandidate() {
 	rf.State 		= Candidate
 	rf.VotedForId 	= rf.me
-	rf.VotedCount++
-	rf.CurrentTerm++
+	rf.VotedCount ++
+	rf.CurrentTerm ++
 	rf.ResetTimeOut()
-	debug("===> _%d_ (%d) candidate =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
+	//debug("===> _%d_ (%d) candidate =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
 }
 /* 转为 Leader，更新 State */
 func (rf *Raft) turnLeader() {
 	rf.State = Leader
-	debug("===> [%d] (%d) leader =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
+	//debug("===> _%d_ (%d) leader =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
 }
 
 //
@@ -211,10 +211,13 @@ func (rf *Raft) server() {
 	for !rf.isDone() {
 		switch rf.syncState() {
 		case Leader:
+			debug("===> _%d_ (%d) leader =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
 			rf.serverAsleader()
 		case Candidate:
+			debug("===> _%d_ (%d) candidate =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
 			rf.serverAscandidate()
 		case Follower:
+			debug("===> _%d_ (%d) follower =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
 			rf.serverAsfollower()
 		}
 	}
@@ -263,6 +266,8 @@ func (rf *Raft) syncTimeOut() int {
 	defer rf.mu.Unlock()
 	return rf.ElectionTimeout
 }
+/* 判断能否投票；实验2B要加上 Log 的判断 */
+/* return rf.agreeTerm(candidateId) && rf.agreeLog(...) */
 func (rf *Raft) CanVote(candidateId int) bool {
 	return rf.agreeTerm(candidateId)
 }
@@ -285,32 +290,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	if args.Term > rf.CurrentTerm {
 		rf.turnFollower(args.Term, NoLeader)
-		if rf.VotedForId < 0 || rf.VotedForId == args.CandidateId {
-			reply.Term = rf.CurrentTerm
-			reply.VoteGranted = true
-			rf.VotedForId = args.CandidateId
-			rf.getVoteRequest()
-		}
-		return
 	}
 	/* args.Term == rf.CurrentTerm */
 	/* can not trun follower, because they are same level */
 	/* If my VoteFor is not candidater, then i should not vote him */
 	/* Be sure my VoteFor is -1 noleader */
-	if args.Term == rf.CurrentTerm {
-		// [C] vs F   voteforid: -1
-		// [C] vs C   voteforid: rf,me
-		// [C] vs L   voteforid: rf.me
-		if rf.VotedForId < 0 || rf.VotedForId == args.CandidateId {
+	if rf.CanVote(args.CandidateId) {
 			reply.Term = rf.CurrentTerm
 			reply.VoteGranted = true
 			rf.VotedForId = args.CandidateId
 			rf.getVoteRequest()
-		} else {
-			reply.Term = rf.CurrentTerm
-			reply.VoteGranted = false
-		}
-		return
+	} else {
+		reply.Term = rf.CurrentTerm
+		reply.VoteGranted = false
 	}
 }
 /* 接收投票 */
@@ -418,7 +410,7 @@ const EnableDebug = true
 
 func debug(format string, a... interface{}) {
 	if EnableDebug {
-		fmt.Printf(format + "\n", a...)
+		fmt.Printf(format + "\n\n", a...)
 	}
 }
 
