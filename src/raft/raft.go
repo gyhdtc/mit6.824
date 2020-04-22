@@ -69,6 +69,8 @@ type Raft struct {
 	VoteNotify        chan bool // 投票通知 （2）
 	ElectLeaderNotify chan bool // 当选 Leader 通知 （3）
 	HeartTimeout      chan bool
+	HeartOrNot		  bool
+	Flag 			  int
 	/* 上述 chan 将会在 select 中进行等待，发生一个，其他的都不会触发，还要在 server（）函数中进行重置 */
 	/* Follower ： 超时、心跳、投票 */
 	/* Candidate ： 超时、心跳、当选 */
@@ -197,13 +199,13 @@ func (rf *Raft) turnCandidate() {
 	rf.VotedCount++
 	rf.CurrentTerm++
 	rf.ResetTimeOut()
-	//debug("===> _%d_ (%d) candidate =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
+	debug("===> _%d_ (%d) candidate =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
 }
 
 /* 转为 Leader，更新 State */
 func (rf *Raft) turnLeader() {
 	rf.State = Leader
-	//debug("===> _%d_ (%d) leader =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
+	debug("===> _%d_ (%d) leader =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
 }
 
 //
@@ -244,16 +246,23 @@ func (rf *Raft) serverAscandidate() {
 	}
 }
 func (rf *Raft) serverAsleader() {
-	i := 0
-	for i == 0 {
-		select {
-		case <-time.Tick(time.Millisecond * time.Duration(50)):
-			i = 1
-		case rf.HeartTimeout <- true:
-		}
-	}
+	//len := len(rf.peers)
 	rf.SendAppendEntries()
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
+
+	// for i := 0; i < len(rf.peers)-1; i++ {
+	// 	rf.HeartTimeout <- true
+	// }
+	
+	// i := 0
+	// for i == 0 {
+	// 	select {
+	// 	case <- time.Tick(time.Millisecond * time.Duration(70)):
+	// 		i = 1
+	// 	case rf.HeartTimeout <- true:
+	// 	}
+	// }
+	// <- rf.HeartTimeout
 }
 
 //
@@ -396,29 +405,42 @@ func (rf *Raft) SendAppendEntries() {
 			}
 			go func(args AppendEntriesArgs, i int) {
 				var reply AppendEntriesReply
-				ok := make(chan bool, 1)
-
-				debug("===> _%d_[%d] ---send heart---> _%d_", rf.me, rf.CurrentTerm, i)
-
+				
+				// ok := rf.sendAppendEntries(i, &args, &reply)
+				// debug("===> _%d_[%d] ---send heart---> _%d_", rf.me, rf.CurrentTerm, i)
+				// rf.mu.Lock()
+				// if ok {
+				// 	if reply.Success {
+				// 		debug("===> _%d_[%d] <---heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
+				// 	} else {
+				// 		debug("===> _%d_[%d] <---refuse heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
+				// 		rf.turnFollower(reply.Term, reply.LeaderId)
+				// 	}
+				// } else {
+				// 	debug("===> _%d_[%d] ---not send heart---> _%d_", rf.me, rf.CurrentTerm, i)
+				// }
+				// rf.mu.Unlock()
+				debug("XXX %d", rf.me)
 				select {
-				case ok <- rf.sendAppendEntries(i, &args, &reply):
+				case ok := <- rf.sendAppendEntries(i, &args, &reply):
 					{
+						debug("===> _%d_[%d] ---send heart---> _%d_", rf.me, args.Term, i)	
 						rf.mu.Lock()
-						if <-ok {
+						if ok {
 							if reply.Success {
-								debug("===> _%d_[%d] <---heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
+								debug("===> _%d_[%d] <---heart--- _%d_[%d]", rf.me, args.Term, i, reply.Term)
 							} else {
-								debug("===> _%d_[%d] <---refuse heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
+								debug("===> _%d_[%d] <---refuse heart--- _%d_[%d]", rf.me, args.Term, i, reply.Term)
 								rf.turnFollower(reply.Term, reply.LeaderId)
 							}
 						} else {
-							debug("===> _%d_[%d] ---not send heart---> _%d_", rf.me, rf.CurrentTerm, i)
+							debug("===> _%d_[%d] ---not send heart---> _%d_", rf.me, args.Term, i)
 						}
 						rf.mu.Unlock()
 					}
-				case <-rf.HeartTimeout:
+				case <- time.Tick(time.Duration(1) * time.Millisecond):
 					{
-						debug("===> _%d_[%d] ---not send heart---> _%d_", rf.me, rf.CurrentTerm, i)
+						debug("===> _%d_[%d] |||| _%d_", rf.me, rf.CurrentTerm, i)
 					}
 				}
 			}(args, i)
@@ -472,8 +494,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) chan bool {
+	ok := make(chan bool, 1)
+	ok <- rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -557,7 +580,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.HeartBeatNotify = make(chan bool)
 	rf.VoteNotify = make(chan bool)
 	rf.ElectLeaderNotify = make(chan bool)
+	rf.HeartTimeout = make(chan bool, 1)
 	rf.Done = false
+	rf.Flag = 0
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
