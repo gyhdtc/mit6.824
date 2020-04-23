@@ -1,0 +1,65 @@
+// 得到一些列通知，触发 select
+func PutDataToChannel(c chan bool) {
+	c <- true
+}
+
+func (rf *Raft) turnFollower(Term, LeaderId int) {
+	rf.State = Follower
+	rf.CurrentTerm = Term
+	rf.VotedForId = -1
+	rf.VotedCount = 0
+	rf.LeaderId = LeaderId
+}
+func (rf *Raft) serverAsfollower() {
+	select {
+	case <-time.Tick(time.Millisecond * time.Duration(rf.syncTimeOut())):
+		rf.mu.Lock()
+		rf.turnCandidate()
+		rf.mu.Unlock()
+	case <-rf.HeartBeatNotify:
+	case <-rf.VoteNotify:
+	}
+}
+func (rf *Raft) turnCandidate() {
+	rf.State = Candidate
+	rf.VotedForId = rf.me
+	rf.VotedCount++
+	rf.CurrentTerm++
+	rf.ResetTimeOut()
+	debug("===> _%d_ (%d) candidate =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
+}
+func (rf *Raft) serverAscandidate() {
+	rf.SendRequestVote()
+	select {
+	case <-time.Tick(time.Millisecond * time.Duration(rf.syncTimeOut())):
+		rf.mu.Lock()
+		rf.turnCandidate()
+		rf.mu.Unlock()
+	case <-rf.HeartBeatNotify:
+	case <-rf.ElectLeaderNotify:
+	}
+}
+func (rf *Raft) turnLeader() {
+	rf.State = Leader
+	debug("===> _%d_ (%d) leader =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
+}
+func (rf *Raft) serverAsleader() {
+	rf.SendAppendEntries()
+	time.Sleep(100 * time.Millisecond)
+}
+//
+// 【主循环】
+// 根据 raft 的状态来进行相应的 server_as...
+//
+func (rf *Raft) server() {
+	for !rf.isDone() {
+		switch rf.syncState() {
+		case Leader:
+			rf.serverAsleader()
+		case Candidate:
+			rf.serverAscandidate()
+		case Follower:
+			rf.serverAsfollower()
+		}
+	}
+}

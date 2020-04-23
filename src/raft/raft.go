@@ -63,23 +63,29 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// 时变数据
-	State             int       // 状态 F C L
-	ElectionTimeout   int       // 超时选举
-	HeartBeatNotify   chan bool // 心跳通知 （1）
-	VoteNotify        chan bool // 投票通知 （2）
-	ElectLeaderNotify chan bool // 当选 Leader 通知 （3）
+	State             	int       // 状态 F C L
+	ElectionTimeout   	int       // 超时选举
+	HeartBeatNotify   	chan bool // 心跳通知 （1）
+	VoteNotify        	chan bool // 投票通知 （2）
+	ElectLeaderNotify 	chan bool // 当选 Leader 通知 （3）
 		/* 上述 chan 将会在 select 中进行等待，发生一个，其他的都不会触发，还要在 server（）函数中进行重置 */
 		/* Follower ： 超时、心跳、投票 */
 		/* Candidate ： 超时、心跳、当选 */
 		/* Leader ： 发心跳、sleep（） */
-	VotedCount int // 获得票数
-	LeaderId   int
-
+	VotedCount 			int // 获得票数
+	LeaderId   			int
+	
+	// Leader时变数据，选举后初始化
+	NextIndex[]			int
+	MatchIndex[]		int
+	
 	// 持久化数据
-	CurrentTerm int // 当前 Term
-	VotedForId  int // 候选人 ID
+	CurrentTerm 		int 		// 当前 Term
+	VotedForId  		int 		// 候选人 ID
+	log[]				interface{}	// 日志
+
 	// 是否被 kill
-	Done bool
+	Done 				bool
 }
 
 const (
@@ -164,7 +170,6 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term     int
 	Success  bool
-	LeaderId int
 }
 
 // 得到一些列通知，触发 select
@@ -287,12 +292,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	if args.Term > rf.CurrentTerm {
+		// 如果 args.Term > rf.CurrentTerm，那么就要为其投票了
+		// 在下面进行状态转换之后，可以确保一定为其投票
 		rf.turnFollower(args.Term, NoLeader)
 	}
-	/* args.Term == rf.CurrentTerm */
-	/* can not trun follower, because they are same level */
-	/* If my VoteFor is not candidater, then i should not vote him */
-	/* Be sure my VoteFor is -1 noleader */
+	/* 如果 args.Term = rf.CurrentTerm 那么是不能转变状态为 Follower 的 */
+	/* 因为他们处于一种状态，只有判断能否为他投票 */
+	/* 其中就蕴含了，如果是两个Node同时转变为 Candidate，将无法为其投票 */
 	if rf.CanVote(args.CandidateId) {
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = true
@@ -303,7 +309,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 	}
 }
-
 /* 接收投票 */
 
 /* 接收心跳 */
@@ -314,7 +319,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.CurrentTerm > args.Term {
 		reply.Term = rf.CurrentTerm
 		reply.Success = false
-		reply.LeaderId = rf.LeaderId
 		return
 	}
 
@@ -392,7 +396,7 @@ func (rf *Raft) SendAppendEntries() {
 						debug("===> _%d_[%d] <---heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
 					} else {
 						debug("===> _%d_[%d] <---refuse heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
-						rf.turnFollower(reply.Term, reply.LeaderId)
+						rf.turnFollower(reply.Term, NoLeader)
 					}
 				}
 				rf.mu.Unlock()
