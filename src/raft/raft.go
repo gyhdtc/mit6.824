@@ -47,7 +47,10 @@ type ApplyMsg struct {
 	Command      interface{}
 	CommandIndex int
 }
-
+type LogEntry struct {
+	Command		interface{}
+	Term		int
+}
 //
 // A Go object implementing a single Raft peer.
 //
@@ -65,27 +68,34 @@ type Raft struct {
 	// 时变数据
 	State             	int       // 状态 F C L
 	ElectionTimeout   	int       // 超时选举
+
+	/* chan 将会在 select 中进行等待，发生一个，其他的都不会触发，还要在 server（）函数中进行重置 */
+	/* Follower ： 超时、心跳、投票 / Candidate ： 超时、心跳、当选 / Leader ： 发心跳、sleep（） */
 	HeartBeatNotify   	chan bool // 心跳通知 （1）
 	VoteNotify        	chan bool // 投票通知 （2）
 	ElectLeaderNotify 	chan bool // 当选 Leader 通知 （3）
-		/* 上述 chan 将会在 select 中进行等待，发生一个，其他的都不会触发，还要在 server（）函数中进行重置 */
-		/* Follower ： 超时、心跳、投票 */
-		/* Candidate ： 超时、心跳、当选 */
-		/* Leader ： 发心跳、sleep（） */
+
 	VotedCount 			int // 获得票数
-	LeaderId   			int
+	LeaderId   			int // 当前Term的ID
 	
 	// Leader时变数据，选举后初始化
-	NextIndex[]			int
-	MatchIndex[]		int
+	NextIndex			[]int // 发送给每个服务器，将下一个日志条目的索引发送到该服务器(初始化为leader last log index + 1)
+	MatchIndex			[]int // 已经发送给每个服务器，在其他服务器上复制的已知的最高日志项的索引(初始化为0，单调递增)
 	
+	// All Server时变数据
+	CommitIndex			int // 要提交的最高日志项的索引(初始化为0，单调递增)
+	LastApplied			int // 最高日志项的索引(初始化为0，单调递增)
+
 	// 持久化数据
 	CurrentTerm 		int 		// 当前 Term
 	VotedForId  		int 		// 候选人 ID
-	log[]				interface{}	// 日志
+	Log					[]LogEntry	// 日志
 
 	// 是否被 kill
 	Done 				bool
+
+	// 一个通道，Leader负责传递
+	ClientApply			chan ApplyMsg
 }
 
 const (
@@ -164,15 +174,19 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId int
+	Term     		int
+	LeaderId 		int
+	PreLogIndex		int
+	PreLogTerm		int
+	LogEntries		[]LogEntry
+	LeaderCommit	int
 }
 type AppendEntriesReply struct {
 	Term     int
 	Success  bool
 }
 
-// 得到一些列通知，触发 select
+// 得到一系列通知，触发 select
 func PutDataToChannel(c chan bool) {
 	go func () {
 		c <- true
@@ -244,7 +258,6 @@ func (rf *Raft) serverAscandidate() {
 	}
 }
 func (rf *Raft) serverAsleader() {
-	
 	rf.SendAppendEntries()
 	time.Sleep(50 * time.Millisecond)
 }
@@ -476,7 +489,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
+	isLeader 	= rf.State == Leader
+	term		= rf.CurrentTerm
+	index		= len(rf.Log)
+	if !isLeader {
+		return index, term, isLeader
+	}
+	rf.Log = append(rf.Log, LogEntry{
+		Command: command,
+		Term: term,
+	})
 	return index, term, isLeader
 }
 
@@ -532,10 +554,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.ResetTimeOut()
 	rf.turnFollower(0, NoLeader)
-	rf.HeartBeatNotify = make(chan bool, 1)
-	rf.VoteNotify = make(chan bool)
-	rf.ElectLeaderNotify = make(chan bool)
-	rf.Done = false
+	rf.HeartBeatNotify 		= make(chan bool)
+	rf.VoteNotify 			= make(chan bool)
+	rf.ElectLeaderNotify 	= make(chan bool)
+	rf.Done 		= false
+	rf.CommitIndex 	= 0
+	rf.LastApplied 	= 0
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	go rf.server()
