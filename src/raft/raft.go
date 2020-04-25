@@ -484,9 +484,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+	index 		:= -1
+	term 		:= -1
+	isLeader 	:= true
 
 	// Your code here (2B).
 	isLeader 	= rf.State == Leader
@@ -547,16 +547,20 @@ func (rf *Raft) killed() bool {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
+	rf 				:= &Raft{}
+	rf.peers 		= peers
+	rf.persister 	= persister
+	rf.me 			= me
 	// Your initialization code here (2A, 2B, 2C).
+	/* ElectionTimeout */
 	rf.ResetTimeOut()
+	/* State，CurrentTerm, VoteForId, VoteCount, LeaderId */
 	rf.turnFollower(0, NoLeader)
+	
 	rf.HeartBeatNotify 		= make(chan bool)
 	rf.VoteNotify 			= make(chan bool)
 	rf.ElectLeaderNotify 	= make(chan bool)
+	rf.ClientApply			= make(chan ApplyMsg)
 	rf.Done 		= false
 	rf.CommitIndex 	= 0
 	rf.LastApplied 	= 0
