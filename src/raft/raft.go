@@ -79,12 +79,14 @@ type Raft struct {
 	LeaderId   			int // 当前Term的ID
 	
 	// Leader时变数据，选举后初始化
-	NextIndex			[]int // 发送给每个服务器，将下一个日志条目的索引发送到该服务器(初始化为leader last log index + 1)
-	MatchIndex			[]int // 已经发送给每个服务器，在其他服务器上复制的已知的最高日志项的索引(初始化为0，单调递增)
+	/* 发送给每个服务器，将下一个日志条目的索引发送到该服务器(初始化为leader last log index + 1) */
+	NextIndex			[]int 
+	/* 已经发送给每个服务器，在其他服务器上复制的已知的最高日志项的索引(初始化为0，单调递增) */
+	MatchIndex			[]int 
 	
 	// All Server时变数据
-	CommitIndex			int // 要提交的最高日志项的索引(初始化为0，单调递增)
-	LastApplied			int // 最高日志项的索引(初始化为0，单调递增)
+	CommitIndex			int // 要提交给Client的最高日志项的索引(初始化为0，单调递增)
+	LastApplied			int // 已提交给Client的最高日志项的索引(初始化为0，单调递增)
 
 	// 持久化数据
 	CurrentTerm 		int 		// 当前 Term
@@ -203,7 +205,6 @@ func (rf *Raft) turnFollower(Term, LeaderId int) {
 	rf.LeaderId = LeaderId
 	debug("===> _%d_ (%d) follower =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
 }
-
 /* 转为 Candidate，更新 State；选后人自己，得票 ++；当前Term ++；重置选举时间 */
 func (rf *Raft) turnCandidate() {
 	rf.State = Candidate
@@ -213,11 +214,17 @@ func (rf *Raft) turnCandidate() {
 	rf.ResetTimeOut()
 	debug("===> _%d_ (%d) candidate =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
 }
-
 /* 转为 Leader，更新 State */
 func (rf *Raft) turnLeader() {
 	rf.State = Leader
 	debug("===> _%d_ (%d) leader =%d= *%d*", rf.me, rf.ElectionTimeout, rf.CurrentTerm, rf.VotedForId)
+	rf.reinitialized()
+}
+func (rf *Raft) reinitialized() {
+	for i := range rf.peers {
+		rf.NextIndex[i] = len(rf.Log)
+		rf.MatchIndex[i] = 0
+	}
 }
 
 //
@@ -226,6 +233,7 @@ func (rf *Raft) turnLeader() {
 //
 func (rf *Raft) server() {
 	for !rf.isDone() {
+		rf.precheck()
 		switch rf.syncState() {
 		case Leader:
 			rf.serverAsleader()
@@ -259,7 +267,7 @@ func (rf *Raft) serverAscandidate() {
 }
 func (rf *Raft) serverAsleader() {
 	rf.SendAppendEntries()
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 }
 
 //
@@ -280,16 +288,41 @@ func (rf *Raft) syncTimeOut() int {
 	defer rf.mu.Unlock()
 	return rf.ElectionTimeout
 }
-
+/* 检查，提交command */
+func (rf *Raft) precheck() {
+	rf.mu.Lock()
+	if rf.CommitIndex > rf.LastApplied {
+		lastapplyindex := rf.LastApplied
+		CommitIndex := rf.CommitIndex
+		log := rf.Log
+		rf.LastApplied = rf.CommitIndex
+		rf.mu.Lock()
+		rf.Apply(log, lastapplyindex+1, CommitIndex)
+	} else {
+		rf.mu.Unlock()
+	}
+}
+func (rf *Raft) Apply(log []LogEntry, start, end int) {
+	for i := start; i <= end; i++ {
+		rf.ClientApply <- ApplyMsg {
+			CommandIndex	: i,
+			Command			: log[i].Command,
+			CommandValid	: true, 
+		}
+	}
+}
 /* 判断能否投票；实验2B要加上 Log 的判断 */
 /* return rf.agreeTerm(candidateId) && rf.agreeLog(...) */
-func (rf *Raft) CanVote(candidateId int) bool {
-	return rf.agreeTerm(candidateId)
+func (rf *Raft) CanVote(candidateId, candidateTerm, candidateLogIndex int) bool {
+	return rf.agreeTerm(candidateId) && rf.agreeLog(candidateTerm, candidateLogIndex)
 }
 func (rf *Raft) agreeTerm(candidateId int) bool {
 	return rf.VotedForId < 0 || rf.VotedForId == candidateId
 }
-
+func (rf *Raft) agreeLog(candidateTerm, candidateLogIndex int) bool {
+	lastLog := rf.Log[len(rf.Log)-1]
+	return lastLog.Term < candidateTerm || (lastLog.Term == candidateTerm && len(rf.Log)-1 <= candidateLogIndex)
+}
 /* 一些辅助函数 */
 
 // 接收、处理
@@ -312,7 +345,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	/* 如果 args.Term = rf.CurrentTerm 那么是不能转变状态为 Follower 的 */
 	/* 因为他们处于一种状态，只有判断能否为他投票 */
 	/* 其中就蕴含了，如果是两个Node同时转变为 Candidate，将无法为其投票 */
-	if rf.CanVote(args.CandidateId) {
+	if rf.CanVote(args.CandidateId, args.LastLogTerm, args.LastLogIndex) {
 		reply.Term = rf.CurrentTerm
 		reply.VoteGranted = true
 		rf.VotedForId = args.CandidateId
@@ -323,7 +356,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 }
 /* 接收投票 */
-
+==
 /* 接收心跳 */
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
@@ -347,7 +380,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	return
 }
-
 /* 接收心跳 */
 // 接收、处理
 
@@ -360,6 +392,8 @@ func (rf *Raft) SendRequestVote() {
 			args := RequestVoteArgs{
 				Term:        rf.CurrentTerm,
 				CandidateId: rf.me,
+				LastLogIndex: len(rf.Log)-1,
+				LastLogTerm: rf.Log[len(rf.Log)-1].Term,
 			}
 			go func(args RequestVoteArgs, i int) {
 				var reply RequestVoteReply
@@ -394,26 +428,58 @@ func (rf *Raft) SendAppendEntries() {
 	rf.mu.Lock()
 	for i := range rf.peers {
 		if i != rf.me {
-			args := AppendEntriesArgs{
-				Term:     rf.CurrentTerm,
-				LeaderId: rf.me,
-			}
-			go func(args AppendEntriesArgs, i int) {
-				var reply AppendEntriesReply
-				
-				ok := rf.sendAppendEntries(i, &args, &reply)
-				debug("===> _%d_[%d] ---send heart---> _%d_", rf.me, rf.CurrentTerm, i)
-				rf.mu.Lock()
-				if ok {
-					if reply.Success {
-						debug("===> _%d_[%d] <---heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
-					} else {
-						debug("===> _%d_[%d] <---refuse heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
-						rf.turnFollower(reply.Term, NoLeader)
-					}
+			if rf.NextIndex[i] <= len(rf.Log) - 1 {
+				args := AppendEntriesArgs{
+					Term:     rf.CurrentTerm,
+					LeaderId: rf.me,
+					PreLogIndex: rf.NextIndex[i] - 1,
+					PreLogTerm: rf.Log[rf.NextIndex[i]-1].Term,
+					LogEntries: rf.Log[rf.NextIndex[i]:],
+					LeaderCommit: rf.CommitIndex,
 				}
-				rf.mu.Unlock()
-			}(args, i)
+				go func(args AppendEntriesArgs, i int) {
+					var reply AppendEntriesReply
+					
+					ok := rf.sendAppendEntries(i, &args, &reply)
+					debug("===> _%d_[%d] ---send heart---> _%d_", rf.me, rf.CurrentTerm, i)
+					rf.mu.Lock()
+					if ok {
+						if reply.Success {
+							debug("===> _%d_[%d] <---heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
+							
+							rf.MatchIndex[i] = rf.NextIndex[i] + len(args.LogEntries) - 1
+							rf.NextIndex[i] = rf.MatchIndex[i] + 1
+							
+							for n := rf.CommitIndex + 1; n < len(rf.Log); n++ {
+								numOfcopy := 0
+								for m := range rf.peers {
+									if rf.MatchIndex[m] >= n {
+										numOfcopy ++
+									}
+									if numOfcopy > len(rf.peers) / 2 {
+										rf.CommitIndex = n
+									}
+								}
+							}
+						} else if reply.Term > args.Term {
+							debug("===> _%d_[%d] <---refuse heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
+							rf.turnFollower(reply.Term, NoLeader)
+						/* Term和我的相等，却拒绝了我的entry，说明发生了日至冲突 */
+						} else if reply.Term == args.Term {
+							rf.NextIndex[i] --
+						}
+					}
+					rf.mu.Unlock()
+				}(args, i)
+			} else {
+				// 普通心跳
+			}
+		} else {
+			// -------
+			// 这里没懂
+			// -------
+			rf.NextIndex[i] ++
+			rf.MatchIndex[i] ++
 		}
 	}
 	rf.mu.Unlock()
@@ -560,7 +626,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.HeartBeatNotify 		= make(chan bool)
 	rf.VoteNotify 			= make(chan bool)
 	rf.ElectLeaderNotify 	= make(chan bool)
-	rf.ClientApply			= make(chan ApplyMsg)
+	rf.ClientApply			= applyCh
+	rf.Log					= []LogEntry{{}}
+	rf.NextIndex			= make([]int, len(rf.peers))
+	rf.MatchIndex			= make([]int, len(rf.peers))
 	rf.Done 		= false
 	rf.CommitIndex 	= 0
 	rf.LastApplied 	= 0
