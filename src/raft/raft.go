@@ -356,7 +356,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 }
 /* 接收投票 */
-==
+
 /* 接收心跳 */
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
@@ -369,7 +369,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	PutDataToChannel(rf.HeartBeatNotify)
-
+//------
+/* 接收到心跳包中的 pre-term 和 pre-index */
+/* 我们需要找到 follower 中的与之对应的term，一般是最后一个 */
+/* 找到了，在 follower日至中的第 i 个，返回true，删除 i 之后的，复制日至 */
+/* 没找到，返回false，leader中的 nextindex -- */
+//------
 	/* 稳定状态应该是，我是 Follower，并且我的 Term 等于 Leader */
 
 	if !(rf.State == Follower && rf.CurrentTerm == args.Term) {
@@ -420,7 +425,6 @@ func (rf *Raft) SendRequestVote() {
 	}
 	rf.mu.Unlock()
 }
-
 /* 发送投票 */
 
 /* 发送心跳 */
@@ -439,7 +443,6 @@ func (rf *Raft) SendAppendEntries() {
 				}
 				go func(args AppendEntriesArgs, i int) {
 					var reply AppendEntriesReply
-					
 					ok := rf.sendAppendEntries(i, &args, &reply)
 					debug("===> _%d_[%d] ---send heart---> _%d_", rf.me, rf.CurrentTerm, i)
 					rf.mu.Lock()
@@ -461,19 +464,51 @@ func (rf *Raft) SendAppendEntries() {
 									}
 								}
 							}
+						
 						} else if reply.Term > args.Term {
 							debug("===> _%d_[%d] <---refuse heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
 							rf.turnFollower(reply.Term, NoLeader)
-						/* Term和我的相等，却拒绝了我的entry，说明发生了日至冲突 */
+						
 						} else if reply.Term == args.Term {
+							/* Term和我的相等，却拒绝了我的entry，说明发生了日至冲突 */
 							rf.NextIndex[i] --
 						}
 					}
 					rf.mu.Unlock()
 				}(args, i)
+
 			} else {
 				// 普通心跳
+				args := AppendEntriesArgs{
+					Term:     rf.CurrentTerm,
+					LeaderId: rf.me,
+					PreLogIndex: rf.NextIndex[i] - 1,
+					PreLogTerm: rf.Log[rf.NextIndex[i]-1].Term,
+					LeaderCommit: rf.CommitIndex,
+				}
+				go func(args AppendEntriesArgs, i int) {
+					var reply AppendEntriesReply
+					ok := rf.sendAppendEntries(i, &args, &reply)
+					debug("===> _%d_[%d] ---send heart---> _%d_", rf.me, rf.CurrentTerm, i)
+					rf.mu.Lock()
+					if ok {
+						if reply.Success {
+							debug("===> _%d_[%d] <---heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
+							/* 非entry心跳，不需要处理啥 */
+						
+						} else if reply.Term > args.Term {
+							debug("===> _%d_[%d] <---refuse heart--- _%d_[%d]", rf.me, rf.CurrentTerm, i, reply.Term)
+							rf.turnFollower(reply.Term, NoLeader)
+												
+						} else if reply.Term == args.Term {
+							/* Term和我的相等，却拒绝了我的entry，说明发生了日至冲突 */
+							rf.NextIndex[i] --
+						}
+					}
+					rf.mu.Unlock()
+				}(args, i)
 			}
+			
 		} else {
 			// -------
 			// 这里没懂
@@ -484,7 +519,6 @@ func (rf *Raft) SendAppendEntries() {
 	}
 	rf.mu.Unlock()
 }
-
 /* 发送心跳 */
 // 发送
 
