@@ -99,6 +99,7 @@ func (m *Master) GenerateMapTask(files []string) {
 			NReduce:  m.NReduce,
 		}
 		m.MapTasks = append(m.MapTasks, &mapTask)
+		/* 将任务写入通道，此通道没有初始化容量，会阻塞在此，等待通道被读取 */
 		m.MapTaskChan <- (&mapTask)
 	}
 }
@@ -193,6 +194,7 @@ func (m *Master) MonitorMapTask(task *MapTask) {
 		}
 	}
 }
+
 func (m *Master) MonitorReduceTask(task *ReduceTask) {
 	t := time.NewTicker(time.Second * 10)
 	defer t.Stop()

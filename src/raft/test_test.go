@@ -120,7 +120,7 @@ func TestBasicAgree2B(t *testing.T) {
 			t.Fatalf("got index %v but expected %v", xindex, index)
 		}
 	}
-
+	cfg.begin("Test (2B): basic agreement")
 	cfg.end()
 }
 
