@@ -23,7 +23,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
+	"bytes"
+	"encoding/gob"
 	"../labrpc"
 )
 
@@ -134,6 +135,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	e.Encode(rf.CurrentTerm)
+	e.Encode(rf.VotedForId)
+	e.Encode(rf.Log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -156,6 +164,11 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+	d.Decode(&rf.CurrentTerm)
+	d.Decode(&rf.VotedForId)
+	d.Decode(&rf.Log)
 }
 
 //
@@ -349,7 +362,10 @@ func (rf *Raft) agreeLog(candidateTerm, candidateLogIndex int) bool {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	defer func() {
+		rf.persist()
+		rf.mu.Unlock()
+	}()
 
 	if args.Term < rf.CurrentTerm {
 		reply.Term = rf.CurrentTerm
@@ -380,7 +396,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 /* 接收心跳 */
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	defer func() {
+		rf.persist()
+		rf.mu.Unlock()
+	}()
 
 	if rf.CurrentTerm > args.Term {
 		reply.Term = rf.CurrentTerm
@@ -426,7 +445,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	return
 }
-
 /* 接收心跳 */
 // 接收、处理
 
@@ -464,7 +482,6 @@ func (rf *Raft) SendRequestVote() {
 	}
 	rf.mu.Unlock()
 }
-
 /* 发送投票 */
 
 /* 发送心跳 */
@@ -562,7 +579,7 @@ func (rf *Raft) SendAppendEntries() {
 // 发送
 
 // Debug 函数
-const EnableDebug = true
+const EnableDebug = false
 
 func debug(format string, a ...interface{}) {
 	if EnableDebug {
@@ -641,6 +658,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 		Term:    term,
 	})
+
+	rf.persist()
+
 	return index, term, isLeader
 }
 
