@@ -7,4 +7,4 @@ mit 6.824分布式系统设计的lab练习
 - lab2C: keep persistent state that survives a reboot，阅读论文raft，实现日志序列化和反序列化，以及完成论文第7页底部的nextindex优化（done）
 - lab3A: Key/Value Service without log compaction，基于lab2的raft协议实现一个可容错的kv存储系统，可以不支持日志压缩（done）
 
-- Zookeeper的配置；Cpp+ZK 构建的一个简单demo 
+- Zookeeper的配置；C++、ZK 构建的一个简单demo 
