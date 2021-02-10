@@ -19,7 +19,6 @@ void InitWatch(zhandle_t* zh, int type, int state, const char* path, void* watch
   }
 }
 
-
 void ChildWatch(zhandle_t* zh, int type, int state, const char* path, void* watcher) {
   if (type == ZOO_CHILD_EVENT) {
     struct String_vector str_vec;
@@ -57,6 +56,5 @@ int main(int argc, char* argv[]) {
     }
     sleep(120);
   }
-
   zookeeper_close(zkhandle);
 }
